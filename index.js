@@ -60,14 +60,55 @@ if (!/^v22\./.test(process.version)) {
 console.log('[ESN CAM] Running under private Node 22:', process.version)
 
 fs.mkdirSync(VIEWER_DIR, { recursive: true })
+
+function findHostBrowser() {
+  const direct = [
+    process.env.CHROME_EXECUTABLE_PATH,
+    process.env.CHROMIUM_EXECUTABLE_PATH,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/headless_shell',
+    '/snap/bin/chromium'
+  ].filter(Boolean)
+
+  for (const candidate of direct) {
+    try { if (fs.existsSync(candidate)) return candidate } catch {}
+  }
+
+  for (const name of ['chromium', 'chromium-browser', 'google-chrome-stable', 'google-chrome', 'headless_shell']) {
+    try {
+      const found = spawnSync('which', [name], { encoding: 'utf8' })
+      const resolved = String(found.stdout || '').trim()
+      if (found.status === 0 && resolved && fs.existsSync(resolved)) return resolved
+    } catch {}
+  }
+  return null
+}
+
+const hostBrowser = findHostBrowser()
 const viewerPackage = {
   name: 'esn-cam-viewer-runtime',
   private: true,
   dependencies: {
     'prismarine-viewer': '1.33.0',
     'puppeteer-core': '25.11.0',
-    '@sparticuz/chromium': '153.0.0'
+    ...(hostBrowser ? {} : { '@sparticuz/chromium': '153.0.0' })
   }
+}
+
+if (hostBrowser) {
+  console.log('[ESN CAM] Host Chromium/Chrome detected: ' + hostBrowser)
+  console.log('[ESN CAM] Packaged Chromium is not needed; removing it to save disk.')
+  for (const stale of [
+    path.join(VIEWER_MODULES, '@sparticuz', 'chromium'),
+    path.join(VIEWER_MODULES, '@sparticuz', 'chromium-min')
+  ]) {
+    try { fs.rmSync(stale, { recursive: true, force: true }) } catch {}
+  }
+} else {
+  console.log('[ESN CAM] No host Chromium detected; packaged Chromium fallback will be installed.')
 }
 
 // ESN CAM records Java entirely inside Chromium. The lightweight world-stream
