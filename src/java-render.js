@@ -91,6 +91,128 @@ function waitForStableFile(filePath, timeoutMs = 45000) {
   })
 }
 
+
+async function startBrowserViewerBridge(bot, { port, firstPerson = true, viewDistance = 6 }, stage) {
+  // Do NOT require prismarine-viewer/lib/mineflayer here. That module imports
+  // the package's full server-side Viewer/Entities stack, which pulls native
+  // canvas/GL code into CogitHost even though the actual rendering happens in
+  // Chromium. We only need WorldView + the static browser bundle + socket.io.
+  stage('VIEWER_BRIDGE', 'loading lightweight world-stream bridge')
+
+  const EventEmitter = require('node:events')
+  const http = require('node:http')
+  const express = require('express')
+  const socketIO = require('socket.io')
+  const { setupRoutes } = require('prismarine-viewer/lib/common')
+  const { WorldView } = require('prismarine-viewer/viewer/lib/worldView')
+
+  const app = express()
+  const server = http.createServer(app)
+  const io = socketIO(server, { path: '/socket.io' })
+  setupRoutes(app, '')
+
+  // Keep the secure texture proxy from Prismarine Viewer's normal server so
+  // player skins/capes still render in Chromium.
+  app.get('/texture/:hash([0-9a-f]+)', async (req, res) => {
+    try {
+      const texture = await fetch('https://textures.minecraft.net/texture/' + req.params.hash)
+      if (!texture.ok) return res.sendStatus(texture.status === 404 ? 404 : 502)
+      res.type('png').send(Buffer.from(await texture.arrayBuffer()))
+    } catch {
+      res.sendStatus(502)
+    }
+  })
+
+  const sockets = new Set()
+  const worldViews = new Map()
+  const primitives = {}
+  bot.viewer = new EventEmitter()
+
+  bot.viewer.erase = id => {
+    delete primitives[id]
+    for (const socket of sockets) socket.emit('primitive', { id })
+  }
+  bot.viewer.drawBoxGrid = (id, start, end, color = 'aqua') => {
+    primitives[id] = { type: 'boxgrid', id, start, end, color }
+    for (const socket of sockets) socket.emit('primitive', primitives[id])
+  }
+  bot.viewer.drawLine = (id, points, color = 0xff0000) => {
+    primitives[id] = { type: 'line', id, points, color }
+    for (const socket of sockets) socket.emit('primitive', primitives[id])
+  }
+  bot.viewer.drawPoints = (id, points, color = 0xff0000, size = 5) => {
+    primitives[id] = { type: 'points', id, points, color, size }
+    for (const socket of sockets) socket.emit('primitive', primitives[id])
+  }
+
+  io.on('connection', socket => {
+    sockets.add(socket)
+    socket.emit('version', bot.version)
+
+    const worldView = new WorldView(bot.world, viewDistance, bot.entity.position, socket)
+    worldViews.set(socket.id, worldView)
+
+    Promise.resolve(worldView.init(bot.entity.position)).catch(error => {
+      stage('VIEWER_WORLD_WARN', String(error?.message || error).slice(0, 300))
+    })
+
+    worldView.on('blockClicked', (block, face, button) => {
+      bot.viewer.emit('blockClicked', block, face, button)
+    })
+
+    for (const id in primitives) socket.emit('primitive', primitives[id])
+
+    const botPosition = () => {
+      const packet = { pos: bot.entity.position, yaw: bot.entity.yaw, addMesh: true }
+      if (firstPerson) packet.pitch = bot.entity.pitch
+      socket.emit('position', packet)
+      Promise.resolve(worldView.updatePosition(bot.entity.position)).catch(() => {})
+    }
+
+    bot.on('move', botPosition)
+    worldView.listenToBot(bot)
+    botPosition()
+
+    socket.on('disconnect', () => {
+      bot.removeListener('move', botPosition)
+      try { worldView.removeListenersFromBot(bot) } catch {}
+      worldViews.delete(socket.id)
+      sockets.delete(socket)
+    })
+  })
+
+  await new Promise((resolve, reject) => {
+    const onError = error => {
+      server.removeListener('listening', onListening)
+      reject(error)
+    }
+    const onListening = () => {
+      server.removeListener('error', onError)
+      resolve()
+    }
+    server.once('error', onError)
+    server.once('listening', onListening)
+    server.listen(port, '127.0.0.1')
+  })
+
+  stage('VIEWER_BRIDGE', 'listening on 127.0.0.1:' + port)
+
+  const close = async () => {
+    for (const [socketId, worldView] of worldViews) {
+      const socket = [...sockets].find(item => item.id === socketId)
+      try { worldView.removeListenersFromBot(bot) } catch {}
+      try { socket?.disconnect(true) } catch {}
+    }
+    worldViews.clear()
+    sockets.clear()
+    try { io.close() } catch {}
+    await new Promise(resolve => server.close(() => resolve())).catch(() => {})
+  }
+
+  bot.viewer.close = close
+  return close
+}
+
 async function testJavaRender(config, onMsaCode, onStage) {
   const stage = (name, detail = '') => {
     console.log(`[Java render] ${name}${detail ? ': ' + detail : ''}`)
@@ -146,7 +268,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
   let bot
   let browser
   let originalBotVersion
-  let viewerStarted = false
+  let viewerClose
   try {
     stage('CONNECT', `joining ${config.host}`)
     bot = mineflayer.createBot(botOptions)
@@ -198,9 +320,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
 
     stage('RENDERER', 'starting Chromium + SwiftShader browser renderer')
 
-    // Import only the browser-backed Mineflayer viewer server. Importing the
-    // package root eagerly loads its legacy native headless renderer too.
-    const prismarineViewer = require('prismarine-viewer/lib/mineflayer')
+    stage('BROWSER_MODULES', 'loading Puppeteer and Chromium')
     const puppeteer = require('puppeteer-core')
     const chromiumModule = require('@sparticuz/chromium')
     const chromium = chromiumModule.default || chromiumModule
@@ -215,12 +335,11 @@ async function testJavaRender(config, onMsaCode, onStage) {
     }
 
     const viewerPort = await getFreePort()
-    prismarineViewer(bot, {
+    viewerClose = await startBrowserViewerBridge(bot, {
       port: viewerPort,
       firstPerson: true,
       viewDistance: 6
-    })
-    viewerStarted = true
+    }, stage)
     await wait(750)
 
     chromium.setGraphicsMode = true
@@ -364,7 +483,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
     }
   } finally {
     try { await browser?.close() } catch {}
-    try { if (viewerStarted) bot?.viewer?.close?.() } catch {}
+    try { await viewerClose?.() } catch {}
     try { if (bot && originalBotVersion) bot.version = originalBotVersion } catch {}
     try { bot?.quit('ESN CAM render test complete') } catch {}
   }
