@@ -367,9 +367,9 @@ async function createDiscordController(config, camera, recorder, fullConfig) {
             `**Host video renderer ready:** ${statusLine(d.rendererReady)}\n` +
             `**Java viewer components**\n` +
             `Prismarine Viewer: ${statusLine(d.prismarineViewer)}\n` +
-            `node-canvas-webgl: ${statusLine(d.nodeCanvasWebgl)}\n` +
-            `Xvfb: ${statusLine(d.xvfbRun)}\n` +
-            `DISPLAY: ${statusLine(d.display)}\n` +
+            `Puppeteer Core: ${statusLine(d.puppeteerCore)}\n` +
+            `Chromium/SwiftShader: ${statusLine(d.chromium)}\n` +
+            `Legacy native GL disabled: ${statusLine(!d.legacyNativeRenderer)}\n` +
             `FFmpeg: ${statusLine(d.ffmpeg)}\n` +
             `Node: ${d.node}\n` +
             `Writable auth storage: ${statusLine(d.authDirectoryWritable)}\n` +
