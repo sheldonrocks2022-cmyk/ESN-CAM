@@ -301,32 +301,65 @@ async function createDiscordController(config, camera, recorder, fullConfig) {
 
       if (sub === 'java-render-test') {
         await interaction.deferReply({ ephemeral: true })
-        await interaction.editReply('Joining ESN SMP with the Java CAM and attempting a short real render now...')
 
-        const result = await testJavaRender(fullConfig.java, async data => {
-          const url = data.verification_uri || data.verification_uri_complete || 'https://www.microsoft.com/link'
-          const code = data.user_code || data.code || 'Check the host console'
-          await interaction.followUp({
-            content: '**Java Microsoft login required**\nOpen: ' + url + '\nCode: **' + code + '**',
-            ephemeral: true
-          }).catch(() => {})
-        })
+        const stages = []
+        const updateStage = async (name, detail = '') => {
+          const cleanDetail = String(detail || '').replace(/\s+/g, ' ').slice(0, 220)
+          stages.push(cleanDetail ? `${name}: ${cleanDetail}` : name)
+          if (stages.length > 8) stages.shift()
 
-        const size = fs.statSync(result.output).size
-        const discordLimit = 24 * 1024 * 1024
-        if (size <= discordLimit) {
-          await interaction.editReply({
-            content:
-              '**JAVA RENDER TEST: PASS**\n' +
-              'Account: **' + result.username + '**\n' +
-              'Version: **' + result.version + '**\n' +
-              'Real Minecraft render attached.',
-            files: [new AttachmentBuilder(result.output)]
-          })
-        } else {
           await interaction.editReply(
-            '**JAVA RENDER TEST: PASS**\nRendered successfully, but the MP4 is too large to attach. Saved as: `' + result.output + '`'
+            '**ESN CAM JAVA RENDER TEST**\n' +
+            'Current stage: **' + name + '**' +
+            (cleanDetail ? '\n' + cleanDetail : '') +
+            '\n\n**Recent stages**\n' +
+            stages.map(stage => '• ' + stage).join('\n')
+          ).catch(() => {})
+        }
+
+        await updateStage('START', 'Preparing the Java CAM render pipeline.')
+
+        try {
+          const result = await testJavaRender(
+            fullConfig.java,
+            async data => {
+              const url = data.verification_uri || data.verification_uri_complete || 'https://www.microsoft.com/link'
+              const code = data.user_code || data.code || 'Check the host console'
+              await interaction.followUp({
+                content: '**Java Microsoft login required**\nOpen: ' + url + '\nCode: **' + code + '**',
+                ephemeral: true
+              }).catch(() => {})
+            },
+            updateStage
           )
+
+          const size = fs.statSync(result.output).size
+          const discordLimit = 24 * 1024 * 1024
+          if (size <= discordLimit) {
+            await interaction.editReply({
+              content:
+                '**JAVA RENDER TEST: PASS**\n' +
+                'Account: **' + result.username + '**\n' +
+                'Version: **' + result.version + '**\n' +
+                'Renderer: **' + (result.renderer || 'Chromium/SwiftShader') + '**\n' +
+                'Real Minecraft render attached.',
+              files: [new AttachmentBuilder(result.output)]
+            })
+          } else {
+            await interaction.editReply(
+              '**JAVA RENDER TEST: PASS**\n' +
+              'Renderer: **' + (result.renderer || 'Chromium/SwiftShader') + '**\n' +
+              'Rendered successfully, but the MP4 is too large to attach. Saved as: `' + result.output + '`'
+            )
+          }
+        } catch (error) {
+          const message = String(error?.message || error).slice(0, 1600)
+          await interaction.editReply(
+            '**JAVA RENDER TEST: FAILED**\n' +
+            'Last stage: **' + (stages.length ? stages[stages.length - 1] : 'unknown') + '**\n\n' +
+            '`' + message.replace(/\`/g, '\\`') + '`'
+          ).catch(() => {})
+          throw error
         }
         return
       }
