@@ -413,6 +413,166 @@ function cleanupRenderStorage(stage) {
   stage('STORAGE', 'automatic cleanup freed about ' + Math.round(freed / 1024 / 1024) + ' MB')
 }
 
+
+function blockRenderStyle(name = '') {
+  const n = String(name).toLowerCase()
+
+  const colors = {
+    black: 0x202124, blue: 0x3155a4, brown: 0x70452b, cyan: 0x2b9da9,
+    gray: 0x777777, green: 0x3f7f3f, light_blue: 0x6eaee8,
+    light_gray: 0xaaaaaa, lime: 0x72b943, magenta: 0xb24fb5,
+    orange: 0xd87f33, pink: 0xd8899b, purple: 0x7b3f98,
+    red: 0xa33b35, white: 0xe8e8e8, yellow: 0xd9c647
+  }
+
+  for (const [key, value] of Object.entries(colors)) {
+    if (n.startsWith(key + '_') || n.includes('_' + key + '_')) return { color: value, opacity: 1 }
+  }
+
+  if (n.includes('water')) return { color: 0x315fae, opacity: 0.55 }
+  if (n.includes('lava')) return { color: 0xe46d1d, opacity: 0.8 }
+  if (n.includes('grass') || n.includes('moss')) return { color: 0x5c8f45, opacity: 1 }
+  if (n.includes('leaves') || n.includes('vine')) return { color: 0x477a3b, opacity: 0.92 }
+  if (n.includes('dirt') || n.includes('mud')) return { color: 0x76543a, opacity: 1 }
+  if (n.includes('sand') || n.includes('sandstone')) return { color: 0xc9b77b, opacity: 1 }
+  if (n.includes('snow') || n.includes('quartz')) return { color: 0xe8e8e8, opacity: 1 }
+  if (n.includes('ice')) return { color: 0x9fd5ea, opacity: 0.72 }
+  if (n.includes('glass')) return { color: 0xa9dce8, opacity: 0.38 }
+  if (n.includes('deepslate') || n.includes('blackstone')) return { color: 0x414247, opacity: 1 }
+  if (n.includes('stone') || n.includes('cobble') || n.includes('andesite')) return { color: 0x777a78, opacity: 1 }
+  if (n.includes('granite')) return { color: 0x9b6755, opacity: 1 }
+  if (n.includes('diorite')) return { color: 0xb9b7b0, opacity: 1 }
+  if (n.includes('brick') || n.includes('terracotta')) return { color: 0x9b5545, opacity: 1 }
+  if (n.includes('oak') || n.includes('wood') || n.includes('plank') || n.includes('log')) return { color: 0x8a6842, opacity: 1 }
+  if (n.includes('spruce')) return { color: 0x60482e, opacity: 1 }
+  if (n.includes('birch')) return { color: 0xc8b985, opacity: 1 }
+  if (n.includes('copper')) return { color: 0xb56f50, opacity: 1 }
+  if (n.includes('gold')) return { color: 0xd6b739, opacity: 1 }
+  if (n.includes('diamond')) return { color: 0x54c6c2, opacity: 1 }
+  if (n.includes('emerald')) return { color: 0x43a85b, opacity: 1 }
+  if (n.includes('redstone')) return { color: 0xb53a31, opacity: 1 }
+  if (n.includes('coal')) return { color: 0x303236, opacity: 1 }
+  if (n.includes('netherrack') || n.includes('nether_brick')) return { color: 0x713c3b, opacity: 1 }
+  if (n.includes('end_stone')) return { color: 0xd5d39b, opacity: 1 }
+  if (n.includes('obsidian')) return { color: 0x29223a, opacity: 1 }
+  if (n.includes('bedrock')) return { color: 0x3c3c3c, opacity: 1 }
+
+  return { color: 0x8a8a86, opacity: 1 }
+}
+
+function isRenderableBlock(block) {
+  if (!block || !block.name) return false
+  const n = String(block.name).toLowerCase()
+  if (n === 'air' || n === 'cave_air' || n === 'void_air') return false
+  if (n.includes('water') || n.includes('lava')) return true
+  if (block.boundingBox === 'empty') return false
+  return true
+}
+
+function buildLightweightScene(bot, stage) {
+  const { Vec3 } = require('vec3')
+  const center = bot.entity.position.floored()
+  const radius = 13
+  const down = 8
+  const up = 10
+  const cache = new Map()
+  const key = (x, y, z) => x + ',' + y + ',' + z
+
+  stage(
+    'SCENE_SCAN',
+    'reading nearby Minecraft blocks around ' + center.x + ', ' + center.y + ', ' + center.z
+  )
+
+  for (let x = center.x - radius; x <= center.x + radius; x++) {
+    for (let z = center.z - radius; z <= center.z + radius; z++) {
+      for (let y = center.y - down; y <= center.y + up; y++) {
+        let block = null
+        try { block = bot.blockAt(new Vec3(x, y, z), false) } catch {}
+        cache.set(key(x, y, z), block)
+      }
+    }
+  }
+
+  const directions = [
+    [1, 0, 0], [-1, 0, 0], [0, 1, 0],
+    [0, -1, 0], [0, 0, 1], [0, 0, -1]
+  ]
+
+  const groups = new Map()
+  let visible = 0
+
+  for (const [coord, block] of cache) {
+    if (!isRenderableBlock(block)) continue
+    const [x, y, z] = coord.split(',').map(Number)
+
+    let exposed = false
+    for (const [dx, dy, dz] of directions) {
+      const neighbor = cache.get(key(x + dx, y + dy, z + dz))
+      if (!isRenderableBlock(neighbor)) {
+        exposed = true
+        break
+      }
+    }
+    if (!exposed) continue
+
+    const style = blockRenderStyle(block.name)
+    const groupKey = style.color + ':' + style.opacity
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, {
+        color: style.color,
+        opacity: style.opacity,
+        positions: []
+      })
+    }
+    groups.get(groupKey).positions.push([x, y, z])
+    visible++
+  }
+
+  const entities = []
+  for (const entity of Object.values(bot.entities || {})) {
+    if (!entity || entity === bot.entity || !entity.position) continue
+    const dx = entity.position.x - center.x
+    const dy = entity.position.y - center.y
+    const dz = entity.position.z - center.z
+    if (Math.abs(dx) > radius || Math.abs(dz) > radius || Math.abs(dy) > 16) continue
+    entities.push({
+      x: entity.position.x,
+      y: entity.position.y,
+      z: entity.position.z,
+      width: Math.max(0.35, Number(entity.width) || 0.6),
+      height: Math.max(0.35, Number(entity.height) || 1.8)
+    })
+  }
+
+  const scene = {
+    groups: [...groups.values()],
+    entities,
+    camera: {
+      x: bot.entity.position.x,
+      y: bot.entity.position.y + 1.62,
+      z: bot.entity.position.z,
+      yaw: Number(bot.entity.yaw) || 0,
+      pitch: Number(bot.entity.pitch) || 0
+    },
+    center: { x: center.x, y: center.y, z: center.z },
+    visible
+  }
+
+  stage(
+    'SCENE_READY',
+    visible + ' exposed blocks in ' + scene.groups.length + ' material groups; ' +
+    entities.length + ' nearby entities'
+  )
+
+  if (visible < 20) {
+    throw new Error(
+      'ESN lightweight renderer could not see enough loaded Minecraft blocks near the Java CAM.'
+    )
+  }
+
+  return scene
+}
+
 async function testJavaRender(config, onMsaCode, onStage) {
   const stage = (name, detail = '') => {
     console.log(`[Java render] ${name}${detail ? ': ' + detail : ''}`)
@@ -600,26 +760,11 @@ async function testJavaRender(config, onMsaCode, onStage) {
       chromiumArgs = chromium.args
     }
 
-    // Keep the live Mineflayer connection on Minecraft 26.2 at all times.
-    // Only the Chromium viewer is told to use Prismarine Viewer's compatible
-    // 26.1 asset pack. Mutating bot.version after spawn can destabilize the
-    // protocol session and cause an immediate disconnect.
-    const viewerVersion = bot.version === '26.2' ? '26.1' : bot.version
-    stage(
-      'VIEWER_ASSETS',
-      'Minecraft session stays on ' + bot.version + '; browser assets use ' + viewerVersion
-    )
-
+    // Prismarine Viewer's 61 MB meshing worker hard-freezes Chromium on
+    // this CogitHost container. Build a small real-world block snapshot from
+    // Mineflayer instead, then render it directly with Three.js in Chromium.
     if (transportFailure) throw transportFailure
-    const viewerPort = await getFreePort()
-    viewerClose = await startBrowserViewerBridge(bot, {
-      port: viewerPort,
-      firstPerson: true,
-      viewDistance: 6,
-      viewerVersion
-    }, stage)
-    await wait(750)
-    await probeViewerHttp(viewerPort, stage)
+    const sceneSnapshot = buildLightweightScene(bot, stage)
 
     chromiumArgs = [
       ...chromiumArgs,
@@ -692,207 +837,120 @@ async function testJavaRender(config, onMsaCode, onStage) {
         stage('BROWSER_' + type.toUpperCase(), detail)
       }
     })
-    page.on('requestfailed', request => {
-      const detail = request.url() + ' :: ' + (request.failure()?.errorText || 'request failed')
-      browserFaults.push('REQUEST_FAILED: ' + detail)
-      stage('REQUEST_FAILED', detail.slice(0, 1000))
-    })
-    page.on('response', response => {
-      const url = response.url()
-      if (response.status() >= 400 && url.startsWith('http://127.0.0.1:' + viewerPort)) {
-        const detail = 'HTTP ' + response.status() + ' ' + url
-        browserFaults.push('HTTP_ERROR: ' + detail)
-        stage('HTTP_ERROR', detail)
-      }
-    })
 
-    stage('VIEWER_PAGE', 'opening ESN browser viewer shell')
-    const nav = await page.goto('http://127.0.0.1:' + viewerPort + '/', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    })
-    stage('VIEWER_PAGE', 'HTML loaded with HTTP ' + (nav?.status?.() ?? 'unknown'))
+    stage('ESN_RENDERER', 'starting lightweight real-block renderer')
 
-    const viewerPackageRoot = path.dirname(require.resolve('prismarine-viewer/package.json'))
-    const viewerBundlePath = path.join(viewerPackageRoot, 'public', 'index.js')
-    const viewerWorkerPath = path.join(viewerPackageRoot, 'public', 'worker.js')
-
-    if (!fs.existsSync(viewerBundlePath)) {
-      throw new Error('Prismarine Viewer browser bundle is missing: ' + viewerBundlePath)
-    }
-    if (!fs.existsSync(viewerWorkerPath)) {
-      throw new Error('Prismarine Viewer worker bundle is missing: ' + viewerWorkerPath)
-    }
-
-    const bundleBytes = fs.statSync(viewerBundlePath).size
-    const workerBytes = fs.statSync(viewerWorkerPath).size
-    stage(
-      'VIEWER_BUNDLE',
-      'bundle ' + Math.round(bundleBytes / 1024) + ' KB; worker ' +
-      Math.round(workerBytes / 1024) + ' KB'
+    await page.setContent(
+      '<!doctype html><html><head><meta charset="utf-8">' +
+      '<title>ESN CAM</title>' +
+      '<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#87b7df}' +
+      'canvas{display:block;width:100%;height:100%}</style>' +
+      '</head><body></body></html>',
+      { waitUntil: 'domcontentloaded', timeout: 10000 }
     )
 
-    // Prismarine Viewer constructs four Web Workers in its Viewer constructor.
-    // Its current 26.1 worker bundle is ~61 MB, so four separate isolates can
-    // stall a small CogitHost container before the browser event loop returns.
-    // Replace Worker with a lazy single-worker proxy before the bundle runs:
-    // all four logical worker slots share one real worker, while broadcast
-    // messages are deduplicated and dirty-section messages still all flow
-    // through to that worker.
-    await page.evaluate(() => {
-      const NativeWorker = window.Worker
-      const broadcastTypes = new Set([
-        'version', 'blockStates', 'chunk', 'unloadChunk',
-        'blockUpdate', 'reset'
-      ])
-
-      let sharedWorker = null
-      let primaryProxy = null
-      let nextId = 0
-
-      window.__esnWorkerPool = {
-        mode: 'lazy-single-worker',
-        proxies: 0,
-        started: false,
-        url: null,
-        errors: []
-      }
-
-      class ESNWorkerProxy {
-        constructor (url, options) {
-          this._id = nextId++
-          this._url = url
-          this._options = options
-          this._onmessage = null
-          this._onerror = null
-
-          if (!primaryProxy) primaryProxy = this
-          window.__esnWorkerPool.proxies = nextId
-        }
-
-        _ensure () {
-          if (sharedWorker) return
-
-          sharedWorker = new NativeWorker(this._url, this._options)
-          window.__esnWorkerPool.started = true
-          window.__esnWorkerPool.url = String(this._url)
-
-          sharedWorker.onmessage = event => {
-            if (primaryProxy && typeof primaryProxy._onmessage === 'function') {
-              primaryProxy._onmessage(event)
-            }
-          }
-
-          sharedWorker.onerror = event => {
-            const message = String(event?.message || 'worker error')
-            window.__esnWorkerPool.errors.push(message)
-            if (primaryProxy && typeof primaryProxy._onerror === 'function') {
-              primaryProxy._onerror(event)
-            }
-          }
-        }
-
-        postMessage (data, transferList) {
-          this._ensure()
-
-          // Prismarine broadcasts these to every logical worker. One copy is
-          // sufficient because every logical slot points at the same worker.
-          if (broadcastTypes.has(data?.type) && this._id !== 0) return
-
-          if (transferList !== undefined) sharedWorker.postMessage(data, transferList)
-          else sharedWorker.postMessage(data)
-        }
-
-        terminate () {
-          // Only the primary logical worker owns the shared native worker.
-          if (this._id === 0 && sharedWorker) {
-            sharedWorker.terminate()
-            sharedWorker = null
-            window.__esnWorkerPool.started = false
-          }
-        }
-
-        set onmessage (handler) {
-          this._onmessage = handler
-        }
-
-        get onmessage () {
-          return this._onmessage
-        }
-
-        set onerror (handler) {
-          this._onerror = handler
-        }
-
-        get onerror () {
-          return this._onerror
-        }
-      }
-
-      window.Worker = ESNWorkerProxy
-    })
-
-    stage('VIEWER_WORKER_POOL', 'installed lazy single-worker proxy before viewer startup')
-
-    // Request the external script only after the worker proxy is installed.
-    await page.evaluate((src) => {
-      window.__esnViewerBoot = { loaded: false, error: null }
-      const script = document.createElement('script')
-      script.src = src
-      script.async = true
-      script.onload = () => { window.__esnViewerBoot.loaded = true }
-      script.onerror = () => { window.__esnViewerBoot.error = 'Failed to load ' + src }
-      document.body.appendChild(script)
-    }, 'http://127.0.0.1:' + viewerPort + '/index.js')
-
-    stage('VIEWER_START', 'viewer bundle requested asynchronously; waiting for canvas')
-
-    let canvasHandle = null
+    let threePath
     try {
-      canvasHandle = await Promise.race([
-        page.waitForSelector('canvas', { timeout: 45000 }),
-        wait(46000).then(() => {
-          throw new Error('Viewer startup watchdog expired after 46 seconds')
-        })
-      ])
+      const threeEntry = require.resolve('three')
+      const buildDir = path.dirname(threeEntry)
+      const min = path.join(buildDir, 'three.min.js')
+      const plain = path.join(buildDir, 'three.js')
+      threePath = fs.existsSync(min) ? min : plain
     } catch (error) {
-      const boot = await Promise.race([
-        page.evaluate(() => ({
-          boot: window.__esnViewerBoot || null,
-          hasCanvas: !!document.querySelector('canvas'),
-          title: document.title,
-          scripts: [...document.scripts].map(script => script.src || '[inline]')
-        })).catch(inspectError => ({ inspectError: String(inspectError?.message || inspectError) })),
-        wait(3000).then(() => ({ inspectError: 'browser main thread was unresponsive' }))
-      ])
+      throw new Error('Three.js browser runtime is unavailable: ' + (error?.message || error))
+    }
 
-      stage('VIEWER_BOOT_FAILED', JSON.stringify(boot).slice(0, 1200))
-      throw new Error(
-        'Prismarine Viewer did not create a canvas before the startup watchdog expired. ' +
-        String(error?.message || error) +
-        (browserFaults.length
-          ? ' | Browser faults: ' + browserFaults.slice(-6).join(' | ')
-          : '')
+    if (!threePath || !fs.existsSync(threePath)) {
+      throw new Error('Three.js browser file could not be found.')
+    }
+
+    stage('ESN_RENDERER', 'loading lightweight Three.js runtime')
+    await page.addScriptTag({ path: threePath })
+
+    await page.evaluate(snapshot => {
+      if (!window.THREE) throw new Error('Three.js did not initialize.')
+
+      const THREE = window.THREE
+      const renderer = new THREE.WebGLRenderer({
+        antialias: false,
+        alpha: false,
+        powerPreference: 'low-power'
+      })
+      renderer.setPixelRatio(1)
+      renderer.setSize(window.innerWidth, window.innerHeight)
+      renderer.outputEncoding = THREE.sRGBEncoding
+      document.body.appendChild(renderer.domElement)
+
+      const scene = new THREE.Scene()
+      scene.background = new THREE.Color(0x87b7df)
+      scene.fog = new THREE.Fog(0x87b7df, 18, 48)
+
+      const camera = new THREE.PerspectiveCamera(
+        72,
+        window.innerWidth / window.innerHeight,
+        0.05,
+        96
       )
-    }
+      camera.position.set(snapshot.camera.x, snapshot.camera.y, snapshot.camera.z)
+      camera.rotation.order = 'ZYX'
+      camera.rotation.set(snapshot.camera.pitch, snapshot.camera.yaw, 0, 'ZYX')
 
-    if (!canvasHandle) {
-      throw new Error('Prismarine Viewer canvas handle was unexpectedly empty.')
-    }
+      scene.add(new THREE.HemisphereLight(0xddeeff, 0x5a5548, 1.05))
+      const sun = new THREE.DirectionalLight(0xffffff, 0.72)
+      sun.position.set(0.6, 1, 0.4)
+      scene.add(sun)
 
-    stage('VIEWER_CANVAS', 'Prismarine Viewer created its WebGL canvas')
+      const geometry = new THREE.BoxGeometry(1, 1, 1)
+      const matrix = new THREE.Matrix4()
 
-    const workerPoolState = await Promise.race([
-      page.evaluate(() => window.__esnWorkerPool || null).catch(() => null),
-      wait(2000).then(() => null)
-    ])
-    stage(
-      'VIEWER_WORKER',
-      workerPoolState
-        ? 'single-worker pool: ' + JSON.stringify(workerPoolState).slice(0, 500)
-        : 'single-worker pool installed; browser state still busy'
-    )
-    await wait(8000)
+      for (const group of snapshot.groups) {
+        const material = new THREE.MeshLambertMaterial({
+          color: group.color,
+          transparent: group.opacity < 1,
+          opacity: group.opacity,
+          depthWrite: group.opacity >= 0.8
+        })
+        const mesh = new THREE.InstancedMesh(geometry, material, group.positions.length)
+        for (let i = 0; i < group.positions.length; i++) {
+          const [x, y, z] = group.positions[i]
+          matrix.makeTranslation(x + 0.5, y + 0.5, z + 0.5)
+          mesh.setMatrixAt(i, matrix)
+        }
+        mesh.instanceMatrix.needsUpdate = true
+        scene.add(mesh)
+      }
+
+      const entityGeometry = new THREE.BoxGeometry(1, 1, 1)
+      const entityMaterial = new THREE.MeshLambertMaterial({ color: 0xd8a56d })
+      for (const entity of snapshot.entities) {
+        const mesh = new THREE.Mesh(entityGeometry, entityMaterial)
+        mesh.scale.set(entity.width, entity.height, entity.width)
+        mesh.position.set(entity.x, entity.y + entity.height / 2, entity.z)
+        scene.add(mesh)
+      }
+
+      const baseYaw = snapshot.camera.yaw
+      const basePitch = snapshot.camera.pitch
+      const started = performance.now()
+
+      function draw () {
+        const t = (performance.now() - started) / 1000
+        camera.rotation.set(
+          basePitch + Math.sin(t * 0.65) * 0.006,
+          baseYaw + Math.sin(t * 0.35) * 0.012,
+          0,
+          'ZYX'
+        )
+        renderer.render(scene, camera)
+        requestAnimationFrame(draw)
+      }
+
+      draw()
+      window.__esnRenderer = renderer
+      window.__esnSceneReady = true
+    }, sceneSnapshot)
+
+    stage('ESN_CANVAS', 'lightweight Minecraft canvas created')
 
     const webgl = await page.evaluate(() => {
       const canvas = document.querySelector('canvas')
@@ -908,9 +966,9 @@ async function testJavaRender(config, onMsaCode, onStage) {
     })
 
     if (!webgl.ok) {
-      throw new Error('Chromium launched, but SwiftShader WebGL was unavailable: ' + (webgl.reason || 'unknown'))
+      throw new Error('ESN lightweight renderer could not use SwiftShader WebGL: ' + (webgl.reason || 'unknown'))
     }
-    stage('WEBGL', 'ready via ' + webgl.renderer)
+    stage('WEBGL', 'ESN renderer ready via ' + webgl.renderer)
 
     const outputDir = path.join(__dirname, '..', 'recordings', 'java-render-tests')
     frameDir = path.join(outputDir, 'frames-' + Date.now())
@@ -920,7 +978,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
     const frames = 40
     const fps = 10
     if (transportFailure) throw transportFailure
-    stage('CAPTURE', 'capturing ' + frames + ' real Minecraft frames')
+    stage('CAPTURE', 'capturing ' + frames + ' lightweight real-world Minecraft frames')
 
     const canvas = await page.$('canvas')
     if (!canvas) throw new Error('Viewer canvas disappeared before capture.')
@@ -955,7 +1013,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
     return {
       ok: true,
       username: bot.username || profile.name,
-      version: originalBotVersion || bot.version || '26.2',
+      version: bot.version || '26.2',
       host: config.host,
       port: config.port || 'SRV/default',
       output,
