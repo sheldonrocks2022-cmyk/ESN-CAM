@@ -732,10 +732,109 @@ async function testJavaRender(config, onMsaCode, onStage) {
       Math.round(workerBytes / 1024) + ' KB'
     )
 
-    // Do not use page.addScriptTag({ content }). That waits for the entire
-    // Prismarine bundle's synchronous startup to finish, which can stall on
-    // small hosted CPUs while the 61 MB worker boots. Append an external
-    // script element and return immediately so Node keeps control of the test.
+    // Prismarine Viewer constructs four Web Workers in its Viewer constructor.
+    // Its current 26.1 worker bundle is ~61 MB, so four separate isolates can
+    // stall a small CogitHost container before the browser event loop returns.
+    // Replace Worker with a lazy single-worker proxy before the bundle runs:
+    // all four logical worker slots share one real worker, while broadcast
+    // messages are deduplicated and dirty-section messages still all flow
+    // through to that worker.
+    await page.evaluate(() => {
+      const NativeWorker = window.Worker
+      const broadcastTypes = new Set([
+        'version', 'blockStates', 'chunk', 'unloadChunk',
+        'blockUpdate', 'reset'
+      ])
+
+      let sharedWorker = null
+      let primaryProxy = null
+      let nextId = 0
+
+      window.__esnWorkerPool = {
+        mode: 'lazy-single-worker',
+        proxies: 0,
+        started: false,
+        url: null,
+        errors: []
+      }
+
+      class ESNWorkerProxy {
+        constructor (url, options) {
+          this._id = nextId++
+          this._url = url
+          this._options = options
+          this._onmessage = null
+          this._onerror = null
+
+          if (!primaryProxy) primaryProxy = this
+          window.__esnWorkerPool.proxies = nextId
+        }
+
+        _ensure () {
+          if (sharedWorker) return
+
+          sharedWorker = new NativeWorker(this._url, this._options)
+          window.__esnWorkerPool.started = true
+          window.__esnWorkerPool.url = String(this._url)
+
+          sharedWorker.onmessage = event => {
+            if (primaryProxy && typeof primaryProxy._onmessage === 'function') {
+              primaryProxy._onmessage(event)
+            }
+          }
+
+          sharedWorker.onerror = event => {
+            const message = String(event?.message || 'worker error')
+            window.__esnWorkerPool.errors.push(message)
+            if (primaryProxy && typeof primaryProxy._onerror === 'function') {
+              primaryProxy._onerror(event)
+            }
+          }
+        }
+
+        postMessage (data, transferList) {
+          this._ensure()
+
+          // Prismarine broadcasts these to every logical worker. One copy is
+          // sufficient because every logical slot points at the same worker.
+          if (broadcastTypes.has(data?.type) && this._id !== 0) return
+
+          if (transferList !== undefined) sharedWorker.postMessage(data, transferList)
+          else sharedWorker.postMessage(data)
+        }
+
+        terminate () {
+          // Only the primary logical worker owns the shared native worker.
+          if (this._id === 0 && sharedWorker) {
+            sharedWorker.terminate()
+            sharedWorker = null
+            window.__esnWorkerPool.started = false
+          }
+        }
+
+        set onmessage (handler) {
+          this._onmessage = handler
+        }
+
+        get onmessage () {
+          return this._onmessage
+        }
+
+        set onerror (handler) {
+          this._onerror = handler
+        }
+
+        get onerror () {
+          return this._onerror
+        }
+      }
+
+      window.Worker = ESNWorkerProxy
+    })
+
+    stage('VIEWER_WORKER_POOL', 'installed lazy single-worker proxy before viewer startup')
+
+    // Request the external script only after the worker proxy is installed.
     await page.evaluate((src) => {
       window.__esnViewerBoot = { loaded: false, error: null }
       const script = document.createElement('script')
@@ -782,7 +881,17 @@ async function testJavaRender(config, onMsaCode, onStage) {
     }
 
     stage('VIEWER_CANVAS', 'Prismarine Viewer created its WebGL canvas')
-    stage('VIEWER_WORKER', 'allowing the large Minecraft meshing worker to initialize')
+
+    const workerPoolState = await Promise.race([
+      page.evaluate(() => window.__esnWorkerPool || null).catch(() => null),
+      wait(2000).then(() => null)
+    ])
+    stage(
+      'VIEWER_WORKER',
+      workerPoolState
+        ? 'single-worker pool: ' + JSON.stringify(workerPoolState).slice(0, 500)
+        : 'single-worker pool installed; browser state still busy'
+    )
     await wait(8000)
 
     const webgl = await page.evaluate(() => {
