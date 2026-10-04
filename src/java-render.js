@@ -269,6 +269,11 @@ async function testJavaRender(config, onMsaCode, onStage) {
   let browser
   let originalBotVersion
   let viewerClose
+  let transportFailure = null
+  let persistentBotError
+  let persistentClientError
+  let persistentKicked
+  let persistentEnd
   try {
     stage('CONNECT', `joining ${config.host}`)
     bot = mineflayer.createBot(botOptions)
@@ -316,10 +321,37 @@ async function testJavaRender(config, onMsaCode, onStage) {
     })
 
     stage('SPAWN', `joined as ${bot.username || profile.name}`)
-    await wait(2500)
+
+    // Keep permanent post-spawn transport listeners. The temporary startup
+    // listeners above are removed once spawn succeeds; without replacements,
+    // a later EventEmitter "error" can terminate Node before Discord receives
+    // any useful failure message.
+    const failTransport = (label, detail) => {
+      const message = String(detail?.message || detail || 'unknown').slice(0, 1200)
+      if (!transportFailure) transportFailure = new Error(label + ': ' + message)
+      stage(label, message)
+    }
+
+    persistentBotError = error => failTransport('MINECRAFT_ERROR', error)
+    persistentClientError = error => failTransport('PROTOCOL_ERROR', error)
+    persistentKicked = reason => failTransport(
+      'KICKED',
+      typeof reason === 'string' ? reason : JSON.stringify(reason)
+    )
+    persistentEnd = reason => failTransport('DISCONNECTED', reason || 'connection ended')
+
+    bot.on('error', persistentBotError)
+    bot.on('kicked', persistentKicked)
+    bot.on('end', persistentEnd)
+    bot?._client?.on?.('error', persistentClientError)
+
+    stage('SETTLE', 'checking that the Java session stays stable after spawn')
+    await wait(3000)
+    if (transportFailure) throw transportFailure
 
     stage('RENDERER', 'starting Chromium + SwiftShader browser renderer')
 
+    if (transportFailure) throw transportFailure
     stage('BROWSER_MODULES', 'loading Puppeteer and Chromium')
     const puppeteer = require('puppeteer-core')
     const chromiumModule = require('@sparticuz/chromium')
@@ -334,6 +366,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
       stage('VIEWER_ASSETS', 'using 26.1 viewer assets for the 26.2 world stream')
     }
 
+    if (transportFailure) throw transportFailure
     const viewerPort = await getFreePort()
     viewerClose = await startBrowserViewerBridge(bot, {
       port: viewerPort,
@@ -359,6 +392,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
       headless: 'shell'
     })
 
+    if (transportFailure) throw transportFailure
     stage('BROWSER', 'launching headless Chromium with SwiftShader')
     browser = await puppeteer.launch({
       args,
@@ -439,6 +473,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
 
     const frames = 40
     const fps = 10
+    if (transportFailure) throw transportFailure
     stage('CAPTURE', 'capturing ' + frames + ' real Minecraft frames')
 
     const canvas = await page.$('canvas')
@@ -484,6 +519,14 @@ async function testJavaRender(config, onMsaCode, onStage) {
   } finally {
     try { await browser?.close() } catch {}
     try { await viewerClose?.() } catch {}
+    try {
+      if (bot) {
+        if (persistentBotError) bot.removeListener('error', persistentBotError)
+        if (persistentKicked) bot.removeListener('kicked', persistentKicked)
+        if (persistentEnd) bot.removeListener('end', persistentEnd)
+        if (persistentClientError) bot?._client?.removeListener?.('error', persistentClientError)
+      }
+    } catch {}
     try { if (bot && originalBotVersion) bot.version = originalBotVersion } catch {}
     try { bot?.quit('ESN CAM render test complete') } catch {}
   }
