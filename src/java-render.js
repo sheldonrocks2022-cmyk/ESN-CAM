@@ -975,27 +975,59 @@ async function testJavaRender(config, onMsaCode, onStage) {
     fs.mkdirSync(frameDir, { recursive: true })
     const output = path.join(outputDir, 'java-render-' + Date.now() + '.mp4')
 
-    const frames = 40
-    const fps = 10
+    // The old test captured 40 PNGs through ElementHandle.screenshot().
+    // On CPU-only SwiftShader hosting, each PNG encode can be very expensive.
+    // Use Chrome DevTools' direct JPEG capture instead: fewer frames, much
+    // less compression work, and per-frame watchdogs so CAPTURE can never hang.
+    const frames = 18
+    const fps = 6
     if (transportFailure) throw transportFailure
-    stage('CAPTURE', 'capturing ' + frames + ' lightweight real-world Minecraft frames')
+    stage('CAPTURE', 'fast capture: ' + frames + ' JPEG frames at ' + fps + ' fps')
 
-    const canvas = await page.$('canvas')
-    if (!canvas) throw new Error('Viewer canvas disappeared before capture.')
+    const canvasExists = await page.evaluate(() => !!document.querySelector('canvas')).catch(() => false)
+    if (!canvasExists) throw new Error('ESN renderer canvas disappeared before capture.')
+
+    const cdp = await page.createCDPSession()
+    const captureStarted = Date.now()
 
     for (let i = 0; i < frames; i++) {
-      const framePath = path.join(frameDir, 'frame-' + String(i).padStart(4, '0') + '.png')
-      await canvas.screenshot({ path: framePath, type: 'png' })
-      await wait(100)
+      if (transportFailure) throw transportFailure
+
+      const shot = await Promise.race([
+        cdp.send('Page.captureScreenshot', {
+          format: 'jpeg',
+          quality: 68,
+          fromSurface: true,
+          captureBeyondViewport: false
+        }),
+        wait(8000).then(() => {
+          throw new Error('Frame ' + (i + 1) + ' capture timed out after 8 seconds.')
+        })
+      ])
+
+      const framePath = path.join(frameDir, 'frame-' + String(i).padStart(4, '0') + '.jpg')
+      fs.writeFileSync(framePath, Buffer.from(shot.data, 'base64'))
+
+      if (i === 0 || (i + 1) % 3 === 0 || i === frames - 1) {
+        stage('CAPTURE_PROGRESS', (i + 1) + '/' + frames + ' frames captured')
+      }
+
+      await wait(80)
     }
 
+    stage(
+      'CAPTURE_DONE',
+      frames + ' frames captured in ' + Math.max(1, Math.round((Date.now() - captureStarted) / 1000)) + 's'
+    )
+
+    stage('ENCODE', 'encoding fast test MP4 with FFmpeg')
     const ffmpeg = spawnSync('ffmpeg', [
       '-y',
       '-framerate', String(fps),
-      '-i', path.join(frameDir, 'frame-%04d.png'),
+      '-i', path.join(frameDir, 'frame-%04d.jpg'),
       '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-crf', '20',
+      '-preset', 'ultrafast',
+      '-crf', '25',
       '-pix_fmt', 'yuv420p',
       '-movflags', '+faststart',
       output
