@@ -134,6 +134,19 @@ async function startBrowserViewerBridge(bot, { port, firstPerson = true, viewDis
   const app = express()
   const server = http.createServer(app)
   const io = socketIO(server, { path: '/socket.io' })
+
+  // Serve a minimal root and inject Prismarine Viewer's compiled browser
+  // bundle directly from Puppeteer. Keeping the URL at "/" preserves the
+  // viewer's expected "/socket.io" path while avoiding a fragile script tag.
+  app.get('/', (req, res) => {
+    res.type('html').send(
+      '<!doctype html><html><head><meta charset="utf-8">' +
+      '<title>ESN CAM Viewer</title>' +
+      '<style>html,body{margin:0;width:100%;height:100%;overflow:hidden}canvas{display:block;width:100%;height:100%}</style>' +
+      '</head><body></body></html>'
+    )
+  })
+
   setupRoutes(app, '')
 
   // Keep the secure texture proxy from Prismarine Viewer's normal server so
@@ -693,16 +706,44 @@ async function testJavaRender(config, onMsaCode, onStage) {
       }
     })
 
-    stage('VIEWER_PAGE', 'opening browser viewer')
+    stage('VIEWER_PAGE', 'opening ESN browser viewer shell')
     const nav = await page.goto('http://127.0.0.1:' + viewerPort + '/', {
       waitUntil: 'domcontentloaded',
       timeout: 30000
     })
     stage('VIEWER_PAGE', 'HTML loaded with HTTP ' + (nav?.status?.() ?? 'unknown'))
 
-    // The Prismarine Viewer bundle creates the canvas synchronously. Poll
-    // ourselves so a failure includes browser-side diagnostics instead of a
-    // generic Puppeteer selector timeout.
+    const viewerPackageRoot = path.dirname(require.resolve('prismarine-viewer/package.json'))
+    const viewerBundlePath = path.join(viewerPackageRoot, 'public', 'index.js')
+    const viewerWorkerPath = path.join(viewerPackageRoot, 'public', 'worker.js')
+
+    if (!fs.existsSync(viewerBundlePath)) {
+      throw new Error('Prismarine Viewer browser bundle is missing: ' + viewerBundlePath)
+    }
+    if (!fs.existsSync(viewerWorkerPath)) {
+      throw new Error('Prismarine Viewer worker bundle is missing: ' + viewerWorkerPath)
+    }
+
+    const bundleBytes = fs.statSync(viewerBundlePath).size
+    const workerBytes = fs.statSync(viewerWorkerPath).size
+    stage(
+      'VIEWER_BUNDLE',
+      'bundle ' + Math.round(bundleBytes / 1024) + ' KB; worker ' +
+      Math.round(workerBytes / 1024) + ' KB'
+    )
+
+    try {
+      const bundleSource = fs.readFileSync(viewerBundlePath, 'utf8')
+      await page.addScriptTag({ content: bundleSource })
+    } catch (error) {
+      throw new Error(
+        'Prismarine Viewer browser bundle injection failed: ' +
+        String(error?.message || error)
+      )
+    }
+
+    stage('VIEWER_START', 'bundle injected; waiting for Minecraft canvas')
+
     const canvasDeadline = Date.now() + 20000
     let canvasReady = false
     while (Date.now() < canvasDeadline) {
@@ -716,17 +757,17 @@ async function testJavaRender(config, onMsaCode, onStage) {
         title: document.title,
         body: document.body?.innerHTML?.slice(0, 1200) || '',
         scripts: [...document.scripts].map(script => ({
-          src: script.src,
-          readyState: script.readyState || null
+          src: script.src || '[inline]',
+          textBytes: script.textContent?.length || 0
         }))
       })).catch(error => ({ inspectError: String(error?.message || error) }))
 
       stage('VIEWER_BOOT_FAILED', JSON.stringify(pageState).slice(0, 1200))
       throw new Error(
-        'Prismarine Viewer page loaded but did not create a canvas. ' +
+        'Prismarine Viewer bundle was injected but did not create a canvas. ' +
         (browserFaults.length
-          ? 'Browser faults: ' + browserFaults.slice(-4).join(' | ')
-          : 'No browser exception was reported; viewer bootstrap bundle did not initialize.')
+          ? 'Browser faults: ' + browserFaults.slice(-6).join(' | ')
+          : 'No browser exception was reported.')
       )
     }
 
