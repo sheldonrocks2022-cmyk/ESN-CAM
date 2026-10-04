@@ -1,0 +1,40 @@
+name: ESN CAM deployment package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build CogitHost upload ZIP
+        run: |
+          rm -rf deploy
+          mkdir -p deploy
+          rsync -a ./ deploy/ \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '.env' \
+            --exclude 'node_modules' \
+            --exclude '.node22-runtime' \
+            --exclude '.viewer-node22' \
+            --exclude 'auth' \
+            --exclude 'auth-java' \
+            --exclude 'recordings' \
+            --exclude 'data' \
+            --exclude 'cinematic-output'
+          cd deploy
+          zip -r ../ESN-CAM-COGITHOST.zip .
+          cd ..
+          unzip -l ESN-CAM-COGITHOST.zip | head -80
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESN-CAM-COGITHOST
+          path: ESN-CAM-COGITHOST.zip
+          if-no-files-found: error
