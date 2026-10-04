@@ -93,6 +93,30 @@ function waitForStableFile(filePath, timeoutMs = 45000) {
 }
 
 
+
+async function probeViewerHttp(port, stage) {
+  const base = 'http://127.0.0.1:' + port
+  for (const asset of ['/', '/index.js']) {
+    try {
+      const response = await fetch(base + asset)
+      const body = await response.arrayBuffer()
+      stage(
+        'VIEWER_HTTP',
+        asset + ' -> HTTP ' + response.status + ', ' + body.byteLength + ' bytes'
+      )
+      if (!response.ok) {
+        throw new Error('Viewer asset ' + asset + ' returned HTTP ' + response.status)
+      }
+      if (asset === '/index.js' && body.byteLength < 1000) {
+        throw new Error('Viewer browser bundle /index.js is missing or unexpectedly small (' + body.byteLength + ' bytes)')
+      }
+    } catch (error) {
+      stage('VIEWER_HTTP_ERROR', String(error?.message || error).slice(0, 700))
+      throw error
+    }
+  }
+}
+
 async function startBrowserViewerBridge(bot, { port, firstPerson = true, viewDistance = 6, viewerVersion }, stage) {
   // Do NOT require prismarine-viewer/lib/mineflayer here. That module imports
   // the package's full server-side Viewer/Entities stack, which pulls native
@@ -582,6 +606,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
       viewerVersion
     }, stage)
     await wait(750)
+    await probeViewerHttp(viewerPort, stage)
 
     chromiumArgs = [
       ...chromiumArgs,
@@ -639,21 +664,73 @@ async function testJavaRender(config, onMsaCode, onStage) {
     }
     stage('WEBGL_PREFLIGHT', 'ready via ' + preflight.renderer)
 
+    const browserFaults = []
+
     page.on('pageerror', error => {
-      stage('PAGE_ERROR', String(error?.message || error).slice(0, 500))
+      const detail = String(error?.stack || error?.message || error).slice(0, 1200)
+      browserFaults.push('PAGE_ERROR: ' + detail)
+      stage('PAGE_ERROR', detail)
     })
     page.on('console', message => {
       const type = message.type()
       if (type === 'error' || type === 'warning') {
-        stage('BROWSER_' + type.toUpperCase(), message.text().slice(0, 500))
+        const detail = message.text().slice(0, 1000)
+        browserFaults.push('BROWSER_' + type.toUpperCase() + ': ' + detail)
+        stage('BROWSER_' + type.toUpperCase(), detail)
+      }
+    })
+    page.on('requestfailed', request => {
+      const detail = request.url() + ' :: ' + (request.failure()?.errorText || 'request failed')
+      browserFaults.push('REQUEST_FAILED: ' + detail)
+      stage('REQUEST_FAILED', detail.slice(0, 1000))
+    })
+    page.on('response', response => {
+      const url = response.url()
+      if (response.status() >= 400 && url.startsWith('http://127.0.0.1:' + viewerPort)) {
+        const detail = 'HTTP ' + response.status() + ' ' + url
+        browserFaults.push('HTTP_ERROR: ' + detail)
+        stage('HTTP_ERROR', detail)
       }
     })
 
-    await page.goto('http://127.0.0.1:' + viewerPort + '/', {
+    stage('VIEWER_PAGE', 'opening browser viewer')
+    const nav = await page.goto('http://127.0.0.1:' + viewerPort + '/', {
       waitUntil: 'domcontentloaded',
       timeout: 30000
     })
-    await page.waitForSelector('canvas', { timeout: 20000 })
+    stage('VIEWER_PAGE', 'HTML loaded with HTTP ' + (nav?.status?.() ?? 'unknown'))
+
+    // The Prismarine Viewer bundle creates the canvas synchronously. Poll
+    // ourselves so a failure includes browser-side diagnostics instead of a
+    // generic Puppeteer selector timeout.
+    const canvasDeadline = Date.now() + 20000
+    let canvasReady = false
+    while (Date.now() < canvasDeadline) {
+      canvasReady = await page.evaluate(() => !!document.querySelector('canvas')).catch(() => false)
+      if (canvasReady) break
+      await wait(250)
+    }
+
+    if (!canvasReady) {
+      const pageState = await page.evaluate(() => ({
+        title: document.title,
+        body: document.body?.innerHTML?.slice(0, 1200) || '',
+        scripts: [...document.scripts].map(script => ({
+          src: script.src,
+          readyState: script.readyState || null
+        }))
+      })).catch(error => ({ inspectError: String(error?.message || error) }))
+
+      stage('VIEWER_BOOT_FAILED', JSON.stringify(pageState).slice(0, 1200))
+      throw new Error(
+        'Prismarine Viewer page loaded but did not create a canvas. ' +
+        (browserFaults.length
+          ? 'Browser faults: ' + browserFaults.slice(-4).join(' | ')
+          : 'No browser exception was reported; viewer bootstrap bundle did not initialize.')
+      )
+    }
+
+    stage('VIEWER_CANVAS', 'Prismarine Viewer created its WebGL canvas')
     await wait(6000)
 
     const webgl = await page.evaluate(() => {
