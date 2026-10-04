@@ -243,6 +243,52 @@ function removePathSafe(target, stage, label) {
   }
 }
 
+
+function findSystemChromium(stage) {
+  const candidates = [
+    process.env.CHROME_EXECUTABLE_PATH,
+    process.env.CHROMIUM_EXECUTABLE_PATH,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/headless_shell',
+    '/snap/bin/chromium'
+  ].filter(Boolean)
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        stage('SYSTEM_BROWSER', 'using ' + candidate)
+        return candidate
+      }
+    } catch {}
+  }
+
+  for (const name of ['chromium', 'chromium-browser', 'google-chrome-stable', 'google-chrome', 'headless_shell']) {
+    try {
+      const found = spawnSync('which', [name], { encoding: 'utf8' })
+      const resolved = String(found.stdout || '').trim()
+      if (found.status === 0 && resolved && fs.existsSync(resolved)) {
+        stage('SYSTEM_BROWSER', 'using ' + resolved)
+        return resolved
+      }
+    } catch {}
+  }
+
+  stage('SYSTEM_BROWSER', 'no host Chromium/Chrome binary found')
+  return null
+}
+
+function freeSpaceMb(target = os.tmpdir()) {
+  try {
+    const stat = fs.statfsSync(target)
+    return Math.floor(Number(stat.bavail) * Number(stat.bsize) / 1024 / 1024)
+  } catch {
+    return null
+  }
+}
+
 function cleanupRenderStorage(stage) {
   let freed = 0
   const renderRoot = path.join(__dirname, '..', 'recordings', 'java-render-tests')
@@ -414,10 +460,32 @@ async function testJavaRender(config, onMsaCode, onStage) {
     stage('RENDERER', 'starting Chromium + SwiftShader browser renderer')
 
     if (transportFailure) throw transportFailure
-    stage('BROWSER_MODULES', 'loading Puppeteer and Chromium')
+    stage('BROWSER_MODULES', 'loading Puppeteer')
     const puppeteer = require('puppeteer-core')
-    const chromiumModule = require('@sparticuz/chromium')
-    const chromium = chromiumModule.default || chromiumModule
+
+    // Prefer a browser already present on the host. This avoids unpacking the
+    // large @sparticuz/chromium binary into /tmp on small-disk containers.
+    let executablePath = findSystemChromium(stage)
+    let chromiumArgs = []
+
+    if (!executablePath) {
+      const freeMb = freeSpaceMb(os.tmpdir())
+      stage('STORAGE_FREE', freeMb == null ? 'unable to read free space' : freeMb + ' MB free in ' + os.tmpdir())
+      if (freeMb != null && freeMb < 300) {
+        throw new Error(
+          'CogitHost has only ' + freeMb + ' MB free in ' + os.tmpdir() +
+          '. ESN CAM needs roughly 300 MB free to unpack its fallback Chromium. ' +
+          'Delete old ZIPs/runtime files or increase disk storage.'
+        )
+      }
+
+      stage('BROWSER_FALLBACK', 'using packaged Chromium because no system browser was found')
+      const chromiumModule = require('@sparticuz/chromium')
+      const chromium = chromiumModule.default || chromiumModule
+      chromium.setGraphicsMode = true
+      executablePath = await chromium.executablePath()
+      chromiumArgs = chromium.args
+    }
 
     // Keep the live Mineflayer connection on Minecraft 26.2 at all times.
     // Only the Chromium viewer is told to use Prismarine Viewer's compatible
@@ -439,16 +507,16 @@ async function testJavaRender(config, onMsaCode, onStage) {
     }, stage)
     await wait(750)
 
-    chromium.setGraphicsMode = true
-    const executablePath = await chromium.executablePath()
-    const chromiumArgs = [
-      ...chromium.args,
+    chromiumArgs = [
+      ...chromiumArgs,
       '--enable-webgl',
       '--ignore-gpu-blocklist',
       '--enable-unsafe-swiftshader',
       '--use-gl=angle',
       '--use-angle=swiftshader',
-      '--disable-dev-shm-usage'
+      '--disable-dev-shm-usage',
+      '--no-sandbox',
+      '--disable-setuid-sandbox'
     ]
 
     const args = await puppeteer.defaultArgs({
