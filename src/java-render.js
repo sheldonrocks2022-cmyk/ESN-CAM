@@ -198,7 +198,9 @@ async function testJavaRender(config, onMsaCode, onStage) {
 
     stage('RENDERER', 'starting Chromium + SwiftShader browser renderer')
 
-    const prismarineViewer = require('prismarine-viewer')
+    // Import only the browser-backed Mineflayer viewer server. Importing the
+    // package root eagerly loads its legacy native headless renderer too.
+    const prismarineViewer = require('prismarine-viewer/lib/mineflayer')
     const puppeteer = require('puppeteer-core')
     const chromiumModule = require('@sparticuz/chromium')
     const chromium = chromiumModule.default || chromiumModule
@@ -213,7 +215,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
     }
 
     const viewerPort = await getFreePort()
-    prismarineViewer.mineflayer(bot, {
+    prismarineViewer(bot, {
       port: viewerPort,
       firstPerson: true,
       viewDistance: 6
@@ -254,6 +256,28 @@ async function testJavaRender(config, onMsaCode, onStage) {
     })
 
     const page = await browser.newPage()
+
+    // Prove that the browser itself has a working software WebGL context before
+    // loading Prismarine Viewer. This keeps native headless-gl completely out of
+    // the render path and gives a useful error if SwiftShader is unavailable.
+    const preflight = await page.evaluate(() => {
+      const canvas = document.createElement('canvas')
+      canvas.width = 32
+      canvas.height = 32
+      const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl')
+      if (!gl) return { ok: false, reason: 'Chromium could not create a WebGL context' }
+      let renderer = 'unknown'
+      try {
+        const ext = gl.getExtension('WEBGL_debug_renderer_info')
+        renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)
+      } catch {}
+      return { ok: true, renderer }
+    })
+    if (!preflight.ok) {
+      throw new Error('Chromium SwiftShader preflight failed: ' + preflight.reason)
+    }
+    stage('WEBGL_PREFLIGHT', 'ready via ' + preflight.renderer)
+
     page.on('pageerror', error => {
       stage('PAGE_ERROR', String(error?.message || error).slice(0, 500))
     })
