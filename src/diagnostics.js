@@ -28,9 +28,10 @@ function runDiagnostics(config) {
     edition: config.minecraft.edition || 'unknown',
     bedrockProtocol: canRequire('bedrock-protocol'),
     ffmpeg: commandExists('ffmpeg'),
-    xvfbRun: commandExists('xvfb-run', ['--help']),
-    nodeCanvasWebgl: canRequire('node-canvas-webgl'),
     prismarineViewer: canRequire('prismarine-viewer'),
+    puppeteerCore: canRequire('puppeteer-core'),
+    chromium: canRequire('@sparticuz/chromium'),
+    legacyNativeRenderer: canRequire('node-canvas-webgl') || canRequire('gl'),
     authDirectoryWritable: true,
     recordingsDirectoryWritable: true,
     display: Boolean(process.env.DISPLAY)
@@ -54,9 +55,10 @@ function runDiagnostics(config) {
   } else {
     checks.rendererReady = Boolean(
       checks.prismarineViewer &&
-      checks.nodeCanvasWebgl &&
+      checks.puppeteerCore &&
+      checks.chromium &&
       checks.ffmpeg &&
-      (checks.display || checks.xvfbRun)
+      !checks.legacyNativeRenderer
     )
   }
 
