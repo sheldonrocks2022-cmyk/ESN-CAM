@@ -3,6 +3,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const net = require('node:net')
+const os = require('node:os')
 const { spawnSync } = require('node:child_process')
 const { Authflow, Titles } = require('prismarine-auth')
 
@@ -213,6 +214,65 @@ async function startBrowserViewerBridge(bot, { port, firstPerson = true, viewDis
   return close
 }
 
+
+function removePathSafe(target, stage, label) {
+  try {
+    if (!fs.existsSync(target)) return 0
+    const stat = fs.statSync(target)
+    let bytes = stat.isFile() ? stat.size : 0
+    if (stat.isDirectory()) {
+      const walk = dir => {
+        let total = 0
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const child = path.join(dir, entry.name)
+          try {
+            if (entry.isDirectory()) total += walk(child)
+            else total += fs.statSync(child).size
+          } catch {}
+        }
+        return total
+      }
+      bytes = walk(target)
+    }
+    fs.rmSync(target, { recursive: true, force: true })
+    stage('STORAGE_CLEAN', label + ' freed about ' + Math.round(bytes / 1024 / 1024) + ' MB')
+    return bytes
+  } catch (error) {
+    stage('STORAGE_WARN', label + ': ' + String(error?.message || error).slice(0, 300))
+    return 0
+  }
+}
+
+function cleanupRenderStorage(stage) {
+  let freed = 0
+  const renderRoot = path.join(__dirname, '..', 'recordings', 'java-render-tests')
+
+  try {
+    if (fs.existsSync(renderRoot)) {
+      for (const entry of fs.readdirSync(renderRoot, { withFileTypes: true })) {
+        if (entry.isDirectory() && entry.name.startsWith('frames-')) {
+          freed += removePathSafe(path.join(renderRoot, entry.name), stage, 'old failed render frames')
+        }
+      }
+    }
+  } catch (error) {
+    stage('STORAGE_WARN', 'render cleanup scan: ' + String(error?.message || error).slice(0, 300))
+  }
+
+  // @sparticuz/chromium extracts its executable into the OS temp directory.
+  // Old crash leftovers are safe to remove and can consume a large part of a
+  // small container quota.
+  const tempRoot = os.tmpdir()
+  for (const name of ['chromium', 'swiftshader', 'lib', 'fonts']) {
+    const target = path.join(tempRoot, name)
+    if (fs.existsSync(target)) {
+      freed += removePathSafe(target, stage, 'stale Chromium temp ' + name)
+    }
+  }
+
+  stage('STORAGE', 'automatic cleanup freed about ' + Math.round(freed / 1024 / 1024) + ' MB')
+}
+
 async function testJavaRender(config, onMsaCode, onStage) {
   const stage = (name, detail = '') => {
     console.log(`[Java render] ${name}${detail ? ': ' + detail : ''}`)
@@ -268,6 +328,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
   let bot
   let browser
   let viewerClose
+  let frameDir
   let transportFailure = null
   let persistentBotError
   let persistentClientError
@@ -347,6 +408,8 @@ async function testJavaRender(config, onMsaCode, onStage) {
     stage('SETTLE', 'checking that the Java session stays stable after spawn')
     await wait(3000)
     if (transportFailure) throw transportFailure
+
+    cleanupRenderStorage(stage)
 
     stage('RENDERER', 'starting Chromium + SwiftShader browser renderer')
 
@@ -468,7 +531,7 @@ async function testJavaRender(config, onMsaCode, onStage) {
     stage('WEBGL', 'ready via ' + webgl.renderer)
 
     const outputDir = path.join(__dirname, '..', 'recordings', 'java-render-tests')
-    const frameDir = path.join(outputDir, 'frames-' + Date.now())
+    frameDir = path.join(outputDir, 'frames-' + Date.now())
     fs.mkdirSync(frameDir, { recursive: true })
     const output = path.join(outputDir, 'java-render-' + Date.now() + '.mp4')
 
@@ -520,6 +583,11 @@ async function testJavaRender(config, onMsaCode, onStage) {
   } finally {
     try { await browser?.close() } catch {}
     try { await viewerClose?.() } catch {}
+    try {
+      if (frameDir && fs.existsSync(frameDir)) {
+        fs.rmSync(frameDir, { recursive: true, force: true })
+      }
+    } catch {}
     try {
       if (bot) {
         if (persistentBotError) bot.removeListener('error', persistentBotError)
