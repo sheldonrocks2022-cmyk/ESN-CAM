@@ -65,11 +65,24 @@ const viewerPackage = {
   private: true,
   dependencies: {
     'prismarine-viewer': '1.33.0',
-    'node-canvas-webgl': '0.3.0',
-    'canvas': '3.2.3',
-    'gl': '8.1.6',
     'puppeteer-core': '25.11.0',
     '@sparticuz/chromium': '153.0.0'
+  }
+}
+
+// ESN CAM records Java through a real Chromium WebGL canvas. The old
+// node-canvas-webgl/headless-gl stack is intentionally removed because native
+// GL contexts can return null inside container hosting and crash Prismarine
+// Viewer with "getUniformLocation" before Chromium even starts.
+for (const legacyModule of ['node-canvas-webgl', 'gl', 'canvas']) {
+  const legacyPath = path.join(VIEWER_MODULES, legacyModule)
+  if (exists(legacyPath)) {
+    try {
+      fs.rmSync(legacyPath, { recursive: true, force: true })
+      console.log('[ESN CAM] Removed legacy native viewer module: ' + legacyModule)
+    } catch (error) {
+      console.warn('[ESN CAM] Could not remove legacy viewer module ' + legacyModule + ': ' + error.message)
+    }
   }
 }
 fs.writeFileSync(path.join(VIEWER_DIR, 'package.json'), JSON.stringify(viewerPackage, null, 2))
