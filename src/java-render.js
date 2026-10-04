@@ -92,7 +92,7 @@ function waitForStableFile(filePath, timeoutMs = 45000) {
 }
 
 
-async function startBrowserViewerBridge(bot, { port, firstPerson = true, viewDistance = 6 }, stage) {
+async function startBrowserViewerBridge(bot, { port, firstPerson = true, viewDistance = 6, viewerVersion }, stage) {
   // Do NOT require prismarine-viewer/lib/mineflayer here. That module imports
   // the package's full server-side Viewer/Entities stack, which pulls native
   // canvas/GL code into CogitHost even though the actual rendering happens in
@@ -147,7 +147,7 @@ async function startBrowserViewerBridge(bot, { port, firstPerson = true, viewDis
 
   io.on('connection', socket => {
     sockets.add(socket)
-    socket.emit('version', bot.version)
+    socket.emit('version', viewerVersion || bot.version)
 
     const worldView = new WorldView(bot.world, viewDistance, bot.entity.position, socket)
     worldViews.set(socket.id, worldView)
@@ -267,7 +267,6 @@ async function testJavaRender(config, onMsaCode, onStage) {
 
   let bot
   let browser
-  let originalBotVersion
   let viewerClose
   let transportFailure = null
   let persistentBotError
@@ -357,21 +356,23 @@ async function testJavaRender(config, onMsaCode, onStage) {
     const chromiumModule = require('@sparticuz/chromium')
     const chromium = chromiumModule.default || chromiumModule
 
-    // Prismarine Viewer 1.33.0 has 26.1 rendering assets. The ESN SMP
-    // protocol client remains 26.2; only the browser viewer is told to use
-    // the compatible 26.1 asset set.
-    originalBotVersion = bot.version
-    if (bot.version === '26.2') {
-      bot.version = '26.1'
-      stage('VIEWER_ASSETS', 'using 26.1 viewer assets for the 26.2 world stream')
-    }
+    // Keep the live Mineflayer connection on Minecraft 26.2 at all times.
+    // Only the Chromium viewer is told to use Prismarine Viewer's compatible
+    // 26.1 asset pack. Mutating bot.version after spawn can destabilize the
+    // protocol session and cause an immediate disconnect.
+    const viewerVersion = bot.version === '26.2' ? '26.1' : bot.version
+    stage(
+      'VIEWER_ASSETS',
+      'Minecraft session stays on ' + bot.version + '; browser assets use ' + viewerVersion
+    )
 
     if (transportFailure) throw transportFailure
     const viewerPort = await getFreePort()
     viewerClose = await startBrowserViewerBridge(bot, {
       port: viewerPort,
       firstPerson: true,
-      viewDistance: 6
+      viewDistance: 6,
+      viewerVersion
     }, stage)
     await wait(750)
 
@@ -527,7 +528,6 @@ async function testJavaRender(config, onMsaCode, onStage) {
         if (persistentClientError) bot?._client?.removeListener?.('error', persistentClientError)
       }
     } catch {}
-    try { if (bot && originalBotVersion) bot.version = originalBotVersion } catch {}
     try { bot?.quit('ESN CAM render test complete') } catch {}
   }
 }
