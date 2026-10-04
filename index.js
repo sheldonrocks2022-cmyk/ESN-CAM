@@ -65,18 +65,15 @@ const viewerPackage = {
   private: true,
   dependencies: {
     'prismarine-viewer': '1.33.0',
-    'canvas': '3.2.3',
     'puppeteer-core': '25.11.0',
     '@sparticuz/chromium': '153.0.0'
   }
 }
 
-// ESN CAM records Java through Chromium WebGL. Prismarine Viewer still needs
-// the normal 2D "canvas" package for entity/name-tag textures, so keep canvas.
-// Only the old node-canvas-webgl/headless-gl path is removed because native GL
-// contexts can return null inside container hosting and crash with
-// "getUniformLocation" before Chromium starts.
-for (const legacyModule of ['node-canvas-webgl', 'gl']) {
+// ESN CAM records Java entirely inside Chromium. The lightweight world-stream
+// bridge does not import Prismarine Viewer's server-side Entities/Viewer stack,
+// so none of the native canvas/headless-GL packages are needed on CogitHost.
+for (const legacyModule of ['node-canvas-webgl', 'gl', 'canvas']) {
   const legacyPath = path.join(VIEWER_MODULES, legacyModule)
   if (exists(legacyPath)) {
     try {
