@@ -732,47 +732,58 @@ async function testJavaRender(config, onMsaCode, onStage) {
       Math.round(workerBytes / 1024) + ' KB'
     )
 
+    // Do not use page.addScriptTag({ content }). That waits for the entire
+    // Prismarine bundle's synchronous startup to finish, which can stall on
+    // small hosted CPUs while the 61 MB worker boots. Append an external
+    // script element and return immediately so Node keeps control of the test.
+    await page.evaluate((src) => {
+      window.__esnViewerBoot = { loaded: false, error: null }
+      const script = document.createElement('script')
+      script.src = src
+      script.async = true
+      script.onload = () => { window.__esnViewerBoot.loaded = true }
+      script.onerror = () => { window.__esnViewerBoot.error = 'Failed to load ' + src }
+      document.body.appendChild(script)
+    }, 'http://127.0.0.1:' + viewerPort + '/index.js')
+
+    stage('VIEWER_START', 'viewer bundle requested asynchronously; waiting for canvas')
+
+    let canvasHandle = null
     try {
-      const bundleSource = fs.readFileSync(viewerBundlePath, 'utf8')
-      await page.addScriptTag({ content: bundleSource })
+      canvasHandle = await Promise.race([
+        page.waitForSelector('canvas', { timeout: 45000 }),
+        wait(46000).then(() => {
+          throw new Error('Viewer startup watchdog expired after 46 seconds')
+        })
+      ])
     } catch (error) {
+      const boot = await Promise.race([
+        page.evaluate(() => ({
+          boot: window.__esnViewerBoot || null,
+          hasCanvas: !!document.querySelector('canvas'),
+          title: document.title,
+          scripts: [...document.scripts].map(script => script.src || '[inline]')
+        })).catch(inspectError => ({ inspectError: String(inspectError?.message || inspectError) })),
+        wait(3000).then(() => ({ inspectError: 'browser main thread was unresponsive' }))
+      ])
+
+      stage('VIEWER_BOOT_FAILED', JSON.stringify(boot).slice(0, 1200))
       throw new Error(
-        'Prismarine Viewer browser bundle injection failed: ' +
-        String(error?.message || error)
-      )
-    }
-
-    stage('VIEWER_START', 'bundle injected; waiting for Minecraft canvas')
-
-    const canvasDeadline = Date.now() + 20000
-    let canvasReady = false
-    while (Date.now() < canvasDeadline) {
-      canvasReady = await page.evaluate(() => !!document.querySelector('canvas')).catch(() => false)
-      if (canvasReady) break
-      await wait(250)
-    }
-
-    if (!canvasReady) {
-      const pageState = await page.evaluate(() => ({
-        title: document.title,
-        body: document.body?.innerHTML?.slice(0, 1200) || '',
-        scripts: [...document.scripts].map(script => ({
-          src: script.src || '[inline]',
-          textBytes: script.textContent?.length || 0
-        }))
-      })).catch(error => ({ inspectError: String(error?.message || error) }))
-
-      stage('VIEWER_BOOT_FAILED', JSON.stringify(pageState).slice(0, 1200))
-      throw new Error(
-        'Prismarine Viewer bundle was injected but did not create a canvas. ' +
+        'Prismarine Viewer did not create a canvas before the startup watchdog expired. ' +
+        String(error?.message || error) +
         (browserFaults.length
-          ? 'Browser faults: ' + browserFaults.slice(-6).join(' | ')
-          : 'No browser exception was reported.')
+          ? ' | Browser faults: ' + browserFaults.slice(-6).join(' | ')
+          : '')
       )
+    }
+
+    if (!canvasHandle) {
+      throw new Error('Prismarine Viewer canvas handle was unexpectedly empty.')
     }
 
     stage('VIEWER_CANVAS', 'Prismarine Viewer created its WebGL canvas')
-    await wait(6000)
+    stage('VIEWER_WORKER', 'allowing the large Minecraft meshing worker to initialize')
+    await wait(8000)
 
     const webgl = await page.evaluate(() => {
       const canvas = document.querySelector('canvas')
