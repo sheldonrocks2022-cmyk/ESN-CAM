@@ -23,4 +23,7 @@ jobs:
           node --check src/growth.js
           node --check src/finance.js
           node --check src/video.js
+          node --check src/java.js
+          node --check src/java-render.js
+          node --check src/research.js
           python -m py_compile cinematic-worker/server.py
