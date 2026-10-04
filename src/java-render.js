@@ -282,11 +282,57 @@ function findSystemChromium(stage) {
 
 function freeSpaceMb(target = os.tmpdir()) {
   try {
+    fs.mkdirSync(target, { recursive: true })
     const stat = fs.statfsSync(target)
     return Math.floor(Number(stat.bavail) * Number(stat.bsize) / 1024 / 1024)
   } catch {
     return null
   }
+}
+
+function cleanupSafeCaches(stage) {
+  let freed = 0
+  const home = process.env.HOME || path.join(__dirname, '..')
+  const safeCaches = [
+    path.join(home, '.npm', '_cacache'),
+    path.join(home, '.cache', 'puppeteer'),
+    path.join(home, '.cache', 'chromium'),
+    path.join(home, '.cache', 'chrome-headless-shell')
+  ]
+
+  for (const target of safeCaches) {
+    if (fs.existsSync(target)) {
+      freed += removePathSafe(target, stage, 'safe package/browser cache')
+    }
+  }
+
+  return freed
+}
+
+function selectChromiumTemp(stage) {
+  const root = path.join(__dirname, '..')
+  const candidates = [
+    path.join(root, '.esn-cam-tmp'),
+    path.join(process.env.HOME || root, '.esn-cam-tmp'),
+    '/tmp/esn-cam',
+    '/dev/shm/esn-cam'
+  ]
+
+  const unique = [...new Set(candidates)]
+  let best = null
+
+  for (const target of unique) {
+    const freeMb = freeSpaceMb(target)
+    stage(
+      'STORAGE_CANDIDATE',
+      target + ': ' + (freeMb == null ? 'unknown free space' : freeMb + ' MB free')
+    )
+    if (freeMb != null && (!best || freeMb > best.freeMb)) {
+      best = { target, freeMb }
+    }
+  }
+
+  return best
 }
 
 function cleanupRenderStorage(stage) {
@@ -313,6 +359,17 @@ function cleanupRenderStorage(stage) {
     const target = path.join(tempRoot, name)
     if (fs.existsSync(target)) {
       freed += removePathSafe(target, stage, 'stale Chromium temp ' + name)
+    }
+  }
+
+  for (const stale of [
+    path.join(__dirname, '..', '.esn-cam-tmp', 'chromium'),
+    path.join(__dirname, '..', '.esn-cam-tmp', 'swiftshader'),
+    path.join(__dirname, '..', '.esn-cam-tmp', 'fonts'),
+    path.join(__dirname, '..', '.esn-cam-tmp', 'al2023')
+  ]) {
+    if (fs.existsSync(stale)) {
+      freed += removePathSafe(stale, stage, 'stale ESN Chromium extraction')
     }
   }
 
@@ -469,15 +526,34 @@ async function testJavaRender(config, onMsaCode, onStage) {
     let chromiumArgs = []
 
     if (!executablePath) {
-      const freeMb = freeSpaceMb(os.tmpdir())
-      stage('STORAGE_FREE', freeMb == null ? 'unable to read free space' : freeMb + ' MB free in ' + os.tmpdir())
-      if (freeMb != null && freeMb < 300) {
+      stage('STORAGE_PREP', 'checking writable locations for Chromium extraction')
+
+      let best = selectChromiumTemp(stage)
+      if (!best || best.freeMb < 300) {
+        cleanupSafeCaches(stage)
+        best = selectChromiumTemp(stage)
+      }
+
+      if (!best || best.freeMb < 300) {
+        const detail = best
+          ? best.freeMb + ' MB free at best location ' + best.target
+          : 'no writable storage location could be measured'
         throw new Error(
-          'CogitHost has only ' + freeMb + ' MB free in ' + os.tmpdir() +
-          '. ESN CAM needs roughly 300 MB free to unpack its fallback Chromium. ' +
-          'Delete old ZIPs/runtime files or increase disk storage.'
+          'CogitHost still does not have enough writable space for fallback Chromium: ' +
+          detail +
+          '. ESN CAM needs about 300 MB available during browser extraction.'
         )
       }
+
+      fs.mkdirSync(best.target, { recursive: true })
+      process.env.TMPDIR = best.target
+      process.env.TMP = best.target
+      process.env.TEMP = best.target
+
+      stage(
+        'STORAGE_SELECTED',
+        best.target + ' with ' + best.freeMb + ' MB free; Chromium temp redirected here'
+      )
 
       stage('BROWSER_FALLBACK', 'using packaged Chromium because no system browser was found')
       const chromiumModule = require('@sparticuz/chromium')
